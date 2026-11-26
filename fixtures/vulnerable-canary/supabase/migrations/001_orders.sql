@@ -1,0 +1,6 @@
+CREATE TABLE orders (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  total INTEGER NOT NULL
+);
