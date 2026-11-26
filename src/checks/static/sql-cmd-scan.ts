@@ -1,7 +1,15 @@
 import type { Finding, ModuleResult } from '../../types.js';
-import { isCodeFile, isCommentLine, runStaticModule, type StaticScanContext } from './utils.js';
+import {
+  isCodeFile,
+  isCommentLine,
+  isDevScriptFile,
+  isTestOrMockFile,
+  runStaticModule,
+  type StaticScanContext,
+} from './utils.js';
 
 interface InjectionRule {
+  kind: 'sql' | 'cmd' | 'eval' | 'xss';
   title: string;
   regex: RegExp;
   whyItMatters: string;
@@ -10,9 +18,10 @@ interface InjectionRule {
 
 const INJECTION_RULES: InjectionRule[] = [
   {
+    kind: 'sql',
     title: 'Potential SQL injection via string interpolation or concatenation',
     regex:
-      /(?:\.(?:query|execute|raw|\$queryRawUnsafe|\$executeRawUnsafe)\s*\(\s*(?:`[^`]*\$\{[^}]+\}[^`]*`|['"][^'"]*\b(?:SELECT|INSERT|UPDATE|DELETE)\b[^'"]*['"]\s*\+|f['"][^'"]*\{[^}]+\}[^'"]*['"])|\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b[^;\n]*(?:\$\{[^}]+\}|['"]\s*\+\s*[a-zA-Z_$]))/i,
+      /(?:\.(?:query|execute|raw|\$queryRawUnsafe|\$executeRawUnsafe|prepare)\s*\(\s*(?:`[^`]*\$\{[^}]+\}[^`]*`|['"][^'"]*\b(?:SELECT\s+.+\s+FROM|INSERT\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b[^'"]*['"]\s*\+|f['"][^'"]*\{[^}]+\}[^'"]*['"])|\b(?:SELECT\s+[^;\n]+\s+FROM|INSERT\s+INTO|UPDATE\s+[a-zA-Z0-9_"`.\[\]]+\s+SET|DELETE\s+FROM)\b[^;\n]*(?:\$\{[^}]+\}|['"]\s*\+\s*[a-zA-Z_$]))/i,
     whyItMatters:
       'Interpolating user-controlled input directly into a SQL string lets an attacker alter the query structure, bypass authentication, dump the entire database, or delete records.',
     howToFix:
@@ -20,6 +29,7 @@ const INJECTION_RULES: InjectionRule[] = [
       'AI Fix Prompt: "Refactor the SQL query at this location to use parameterized placeholders instead of string interpolation or concatenation."',
   },
   {
+    kind: 'cmd',
     title: 'Potential command injection via shell execution with dynamic input',
     regex:
       /\b(?:exec|execSync|spawn|spawnSync|os\.system|subprocess\.(?:run|Popen|call))\s*\([^)]*(?:\$\{[^}]+\}|['"]\s*\+|f['"][^'"]*\{[^}]+\}|shell\s*[:=]\s*[Tt]rue)/,
@@ -30,8 +40,9 @@ const INJECTION_RULES: InjectionRule[] = [
       'AI Fix Prompt: "Replace the shell command execution at this location with execFile/spawn using an explicit argument array and strict input allowlisting."',
   },
   {
+    kind: 'eval',
     title: 'Unsafe dynamic code evaluation (eval / new Function)',
-    regex: /\b(?:eval\s*\(|new\s+Function\s*\()/,
+    regex: /(?<![.\w$])eval\s*\(|\bnew\s+Function\s*\(/,
     whyItMatters:
       'Executing dynamically constructed strings as code enables arbitrary Remote Code Execution (RCE) on the server or Cross-Site Scripting (XSS) in the browser if any part of the input is user-controlled.',
     howToFix:
@@ -39,6 +50,7 @@ const INJECTION_RULES: InjectionRule[] = [
       'AI Fix Prompt: "Eliminate eval()/new Function() at this location and replace it with a safe, deterministic alternative."',
   },
   {
+    kind: 'xss',
     title: 'Potential XSS via dangerouslySetInnerHTML',
     regex: /\bdangerouslySetInnerHTML\s*=\s*\{\s*\{\s*__html\s*:/,
     whyItMatters:
@@ -49,12 +61,17 @@ const INJECTION_RULES: InjectionRule[] = [
   },
 ];
 
+const CRYPTO_HASH_UPDATE_REGEX = /\bcreate(?:Hash|Hmac)\s*\([^)]*\)\.update\s*\(/;
+
 export async function runSqlCmdScan(ctx: StaticScanContext): Promise<ModuleResult> {
   return runStaticModule('STAT-002', 'Injection Risks (SQL / Command / XSS)', () => {
     const findings: Finding[] = [];
 
     for (const file of ctx.files) {
       if (!isCodeFile(file.relPath)) continue;
+      if (!ctx.includeTests && isTestOrMockFile(file.relPath)) continue;
+
+      const isDevScript = isDevScriptFile(file.relPath);
 
       for (let i = 0; i < file.lines.length; i++) {
         const line = file.lines[i];
@@ -62,13 +79,12 @@ export async function runSqlCmdScan(ctx: StaticScanContext): Promise<ModuleResul
         if (isCommentLine(line)) continue;
 
         for (const rule of INJECTION_RULES) {
+          if (rule.kind === 'cmd' && isDevScript && !ctx.includeTests) continue;
+          if (rule.kind === 'sql' && CRYPTO_HASH_UPDATE_REGEX.test(line)) continue;
           if (!rule.regex.test(line)) continue;
 
           // Allow dangerouslySetInnerHTML if DOMPurify.sanitize is directly on the same line
-          if (
-            rule.title.includes('dangerouslySetInnerHTML') &&
-            /DOMPurify\.sanitize\s*\(/i.test(line)
-          ) {
+          if (rule.kind === 'xss' && /DOMPurify\.sanitize\s*\(/i.test(line)) {
             continue;
           }
 

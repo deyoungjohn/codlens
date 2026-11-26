@@ -1,5 +1,5 @@
 import type { Finding, ModuleResult } from '../../types.js';
-import { isCodeFile, runStaticModule, type StaticScanContext } from './utils.js';
+import { isCodeFile, isTestOrMockFile, runStaticModule, type StaticScanContext } from './utils.js';
 
 const UPLOAD_SIGNAL_REGEX =
   /\b(?:multer\s*\(|formidable\s*\(|busboy\s*\(|UploadFile|req\.file\b|req\.files\b|formData\(\))/;
@@ -19,6 +19,7 @@ export async function runSafeguardsScan(ctx: StaticScanContext): Promise<ModuleR
 
     for (const file of ctx.files) {
       if (!isCodeFile(file.relPath)) continue;
+      if (!ctx.includeTests && isTestOrMockFile(file.relPath)) continue;
 
       // 1. File upload handlers without MIME type or file size limits
       for (let i = 0; i < file.lines.length; i++) {

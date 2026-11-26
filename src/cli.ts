@@ -205,7 +205,8 @@ program
   .option('--static-only', 'Run only static source-code checks', false)
   .option('--allow-non-local', 'Allow dynamic checks against non-local URLs', false)
   .option('--browser', 'Enable optional Playwright browser checks (lazy-loaded)', false)
-  .option('--skip-deps', 'Skip npm audit / dependency check', false)
+  .option('--skip-deps', 'Skip npm/pnpm audit dependency check', false)
+  .option('--include-tests', 'Include test, mock, and dev-script files in static scans', false)
   .action(
     async (opts: {
       config?: string;
@@ -216,6 +217,7 @@ program
       allowNonLocal: boolean;
       browser: boolean;
       skipDeps: boolean;
+      includeTests: boolean;
     }) => {
       try {
         if (!opts.config && !opts.target) {
@@ -237,6 +239,7 @@ program
           safety: { allowNonLocal: opts.allowNonLocal },
           browser: opts.browser,
           skipDepsAudit: opts.skipDeps,
+          includeTests: opts.includeTests,
         });
 
         const safeProjectSlug = report.projectName.replace(/[^a-zA-Z0-9._-]+/g, '-');

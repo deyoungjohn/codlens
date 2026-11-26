@@ -15,6 +15,7 @@ export interface StaticScanContext {
   config: CodlensConfig;
   stack: DetectedStack;
   files: ScannedFile[];
+  includeTests?: boolean;
 }
 
 const SCANNABLE_EXTENSIONS = new Set([
@@ -198,5 +199,23 @@ export function isCommentLine(line: string): boolean {
     trimmed.startsWith('/*') ||
     trimmed.startsWith('*') ||
     trimmed.startsWith('#')
+  );
+}
+
+export function isTestOrMockFile(relPath: string): boolean {
+  return (
+    /(?:^|\/)(?:__tests__|__mocks__|test|tests|e2e|mocks|fixtures)(?:\/|$)/i.test(relPath) ||
+    /(?:\.|_)(?:test|spec|mock|fixture)\.[a-z0-9]+$/i.test(relPath)
+  );
+}
+
+export function isDevScriptFile(relPath: string): boolean {
+  return /(?:^|\/)scripts\/.+\.[cm]?[jt]sx?$/i.test(relPath);
+}
+
+export function isFrontendUiFile(relPath: string): boolean {
+  return (
+    /\.[jt]sx$/i.test(relPath) ||
+    /(?:^|\/)(?:components|hooks|styles|ui)(?:\/|$)/i.test(relPath)
   );
 }

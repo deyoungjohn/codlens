@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { isPublicBlockchainAddress } from '../src/checks/static/secrets-scan.js';
 import { runStaticAudit } from '../src/checks/static/index.js';
 import { maskSecret } from '../src/checks/static/utils.js';
 import { createDefaultConfig } from '../src/core/config-loader.js';
@@ -220,5 +221,74 @@ describe('static audit suite (STAT-001 through STAT-007)', () => {
     );
 
     expect(highOrCritical).toEqual([]);
+  });
+
+  it('excludes public EVM, Solana, Sui, Bitcoin, BCH, Cosmos, TRON, TON, Stellar, XRP, and Cardano addresses while still flagging 64-hex private keys', async () => {
+    expect(isPublicBlockchainAddress('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')).toBe(true); // EVM
+    expect(isPublicBlockchainAddress('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'const token =')).toBe(true); // Solana USDC mint
+    expect(isPublicBlockchainAddress('0x0000000000000000000000000000000000000000000000000000000000000002', 'const token =')).toBe(true); // Sui 64-hex
+    expect(isPublicBlockchainAddress('0x2::sui::SUI')).toBe(true); // Sui Move coin type
+    expect(isPublicBlockchainAddress('bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq')).toBe(true); // Bitcoin
+    expect(isPublicBlockchainAddress('bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a')).toBe(true); // BCH
+    expect(isPublicBlockchainAddress('cosmos1hsk6jryyqjfhp5dhc55tc9jtckygx0eph6dd02')).toBe(true); // Cosmos
+    expect(isPublicBlockchainAddress('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')).toBe(true); // TRON USDT
+    expect(isPublicBlockchainAddress('EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c')).toBe(true); // TON
+    expect(isPublicBlockchainAddress('GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7')).toBe(true); // Stellar public
+    expect(isPublicBlockchainAddress('rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH')).toBe(true); // XRP
+    // Private key variable with 64-hex MUST NOT be excluded!
+    expect(
+      isPublicBlockchainAddress(
+        '0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d',
+        'const PRIVATE_KEY = "0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d";',
+      ),
+    ).toBe(false);
+
+    const dir = await makeTempProject({
+      'src/tokens.ts': [
+        'export const USDC_BASE = { token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" };',
+        'export const USDC_SOL = { token: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" };',
+        'export const SUI_PKG = { token: "0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf" };',
+      ].join('\n'),
+    });
+
+    const stack = await detectStack(dir);
+    const config = createDefaultConfig(dir, { staticOnly: true });
+    const modules = await runStaticAudit(config, stack, { skipDepsAudit: true });
+    const stat001 = modules.find((m) => m.moduleId === 'STAT-001')!;
+    expect(stat001.findings).toEqual([]);
+  });
+
+  it('eliminates false positives on UI text, crypto.update, page.$eval, Fastify preHandler, frontend TSX, test files, and detects monorepo workspaces', async () => {
+    const dir = await makeTempProject({
+      'package.json': JSON.stringify({ name: 'monorepo-root', private: true }),
+      'pnpm-lock.yaml': 'lockfileVersion: "9.0"\n',
+      'services/api/package.json': JSON.stringify({ dependencies: { fastify: '^5.0.0' } }),
+      'apps/web/package.json': JSON.stringify({ dependencies: { next: '^15.0.0' } }),
+      'apps/web/components/Table.tsx': [
+        'export const Row = ({ i, age, balance }: any) => (',
+        '  <div aria-label={`Select row ${i + 1}`}>{`Last good update ${age}. Total: ${balance.data.total}`}</div>',
+        ');',
+      ].join('\n'),
+      'services/api/src/hmac.ts':
+        'export const sign = (s: string, t: string, b: string) => createHmac("sha256", s).update(`${t}.${b}`).digest("hex");\n',
+      'services/api/src/server.ts': [
+        'app.post("/v1/kill-switch", { preHandler: verifyOperatorAuth }, async (_req, reply) => reply.send({ ok: true }));',
+      ].join('\n'),
+      'scripts/smoke.mjs': [
+        'const rootHtml = await page.$eval("#root", (el) => el.innerHTML.trim());',
+        'execSync(`git status ${branch}`);',
+      ].join('\n'),
+      'services/api/src/sample.test.ts':
+        'const secret = "whsec_test_99887766554433221100aabbcc";\n',
+    });
+
+    const stack = await detectStack(dir);
+    expect(stack.frameworks).toEqual(expect.arrayContaining(['fastify', 'nextjs']));
+    expect(stack.packageManagers).toContain('pnpm');
+
+    const config = createDefaultConfig(dir, { staticOnly: true });
+    const modules = await runStaticAudit(config, stack, { skipDepsAudit: true });
+    const allFindings = modules.flatMap((m) => m.findings);
+    expect(allFindings).toEqual([]);
   });
 });

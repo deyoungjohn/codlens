@@ -11,6 +11,7 @@ import { runValidationScan } from './validation-scan.js';
 
 export interface StaticAuditOptions {
   skipDepsAudit?: boolean;
+  includeTests?: boolean;
 }
 
 /**
@@ -28,6 +29,7 @@ export async function runStaticAudit(
     config,
     stack,
     files,
+    includeTests: options.includeTests ?? false,
   };
 
   const results: ModuleResult[] = await Promise.all([

@@ -27,6 +27,7 @@ export interface RunAuditOptions {
   safety?: SafetyGuardOptions;
   browser?: boolean;
   skipDepsAudit?: boolean;
+  includeTests?: boolean;
   timeoutMs?: number;
 }
 
@@ -90,6 +91,7 @@ export async function runAudit(
   // 1. Static Audit
   const staticResults = await runStaticAudit(config, detectedStack, {
     skipDepsAudit: options.skipDepsAudit,
+    includeTests: options.includeTests,
   });
   modules.push(...staticResults);
 

@@ -1,5 +1,5 @@
 import type { Finding, ModuleResult } from '../../types.js';
-import { isCodeFile, runStaticModule, type StaticScanContext } from './utils.js';
+import { isCodeFile, isTestOrMockFile, runStaticModule, type StaticScanContext } from './utils.js';
 
 const REQUEST_BODY_READ_REGEX =
   /\b(?:req\.body|await\s+req(?:uest)?\.json\(\)|request\.get_json\(\))/;
@@ -16,6 +16,7 @@ export async function runValidationScan(ctx: StaticScanContext): Promise<ModuleR
 
     for (const file of ctx.files) {
       if (!isCodeFile(file.relPath)) continue;
+      if (!ctx.includeTests && isTestOrMockFile(file.relPath)) continue;
 
       const fileHasSchemaLib = /\b(?:from\s+['"](?:zod|joi|yup|valibot)['"]|require\(['"](?:zod|joi|yup)['"]\)|from\s+pydantic\s+import)\b/.test(
         file.content,

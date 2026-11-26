@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import type { Finding, ModuleResult } from '../../types.js';
 import {
   isCommentLine,
+  isTestOrMockFile,
   maskSecret,
   redactLine,
   runStaticModule,
@@ -47,6 +48,48 @@ const HIGH_ENTROPY_ASSIGNMENT_REGEX =
   /\b(?:secret|token|apikey|api_key|private_key|auth_secret|signing_key)\b\s*[:=]\s*['"`]([A-Za-z0-9+/=_-]{24,})['"`]/i;
 
 const PLACEHOLDER_HINTS = /example|placeholder|changeme|your[_-]|dummy|replace[_-]|xxx|0000|process\.env|os\.environ/i;
+
+const PRIVATE_KEY_VAR_HINTS = /\b(?:private_?key|priv_?key|signing_?key|secret_?key|mnemonic|seed_?phrase)\b/i;
+
+/**
+ * Unambiguously public blockchain address formats (never private keys).
+ */
+const UNAMBIGUOUS_PUBLIC_ADDRESS_PATTERNS: RegExp[] = [
+  /^0x[0-9a-fA-F]{40}$/, // EVM (Ethereum, Base, Arbitrum, Optimism, Polygon, BSC, Avalanche)
+  /^0x[0-9a-fA-F]{1,64}::[A-Za-z0-9_]+::[A-Za-z0-9_]+$/, // Sui / Aptos Move coin/struct type
+  /^(?:bc1|tb1)[ac-hj-np-z02-9]{11,71}$/i, // Bitcoin Bech32 / Taproot
+  /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/, // Bitcoin P2PKH / P2SH
+  /^(?:(?:bitcoincash|bchtest):)?[qp][a-z0-9]{41}$/i, // Bitcoin Cash CashAddr
+  /^(?:cosmos|osmo|celestia|inj|juno|sei|tia|stars|akash|noble)1[a-z0-9]{38,58}$/, // Cosmos / IBC
+  /^T[1-9A-HJ-NP-Za-km-z]{33}$/, // TRON
+  /^[a-z0-9._-]+\.(?:near|testnet)$/, // NEAR named accounts
+  /^(?:EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}$/, // TON user-friendly addresses
+  /^addr(?:_test)?1[a-z0-9]{50,110}$/, // Cardano
+  /^G[A-Z2-7]{55}$/, // Stellar public key (never S... secret keys)
+  /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/, // XRP Ledger
+];
+
+/**
+ * Address formats that share length/alphabet with private keys (e.g. 64-hex Sui/Aptos/Starknet
+ * object IDs or 32-44 char Base58 Solana mints/pubkeys, Polkadot SS58).
+ * Excluded only when the assignment line is NOT a private/signing key variable.
+ */
+const CONTEXTUAL_PUBLIC_ADDRESS_PATTERNS: RegExp[] = [
+  /^0x[0-9a-fA-F]{64}$/, // Sui / Aptos / Starknet 32-byte address / object ID
+  /^[1-9A-HJ-NP-Za-km-z]{32,44}$/, // Solana public key / SPL token mint
+  /^[15][1-9A-HJ-NP-Za-km-z]{46,47}$/, // Polkadot / Substrate SS58
+];
+
+export function isPublicBlockchainAddress(value: string, lineContext = ''): boolean {
+  const trimmed = value.trim();
+  if (UNAMBIGUOUS_PUBLIC_ADDRESS_PATTERNS.some((re) => re.test(trimmed))) {
+    return true;
+  }
+  if (!PRIVATE_KEY_VAR_HINTS.test(lineContext)) {
+    return CONTEXTUAL_PUBLIC_ADDRESS_PATTERNS.some((re) => re.test(trimmed));
+  }
+  return false;
+}
 
 async function checkEnvGitHygiene(ctx: StaticScanContext): Promise<Finding[]> {
   const findings: Finding[] = [];
@@ -131,6 +174,8 @@ export async function runSecretsScan(ctx: StaticScanContext): Promise<ModuleResu
     };
 
     for (const file of ctx.files) {
+      if (!ctx.includeTests && isTestOrMockFile(file.relPath)) continue;
+
       const baseName = path.posix.basename(file.relPath);
       if (baseName === 'package-lock.json' || baseName === 'yarn.lock' || baseName === 'pnpm-lock.yaml') {
         continue;
@@ -208,7 +253,11 @@ export async function runSecretsScan(ctx: StaticScanContext): Promise<ModuleResu
           const entropyMatch = HIGH_ENTROPY_ASSIGNMENT_REGEX.exec(line);
           if (entropyMatch) {
             const candidate = entropyMatch[1];
-            if (!PLACEHOLDER_HINTS.test(candidate) && shannonEntropy(candidate) >= 3.8) {
+            if (
+              !PLACEHOLDER_HINTS.test(candidate) &&
+              !isPublicBlockchainAddress(candidate, line) &&
+              shannonEntropy(candidate) >= 3.8
+            ) {
               addFinding(`ent:${file.relPath}:${lineNum}`, {
                 id: 'STAT-001',
                 title: 'High-entropy hardcoded secret detected',

@@ -1,5 +1,11 @@
 import type { Finding, ModuleResult } from '../../types.js';
-import { isCodeFile, runStaticModule, type StaticScanContext } from './utils.js';
+import {
+  isCodeFile,
+  isFrontendUiFile,
+  isTestOrMockFile,
+  runStaticModule,
+  type StaticScanContext,
+} from './utils.js';
 
 const WEBHOOK_ROUTE_REGEX =
   /(?:webhooks?\/(?:paystack|stripe|flutterwave)|x-paystack-signature|stripe-signature|verif-hash)/i;
@@ -11,7 +17,7 @@ const CHECKOUT_CONTEXT_REGEX =
   /\b(?:checkout|payment|charge|order|invoice|subscribe|paystack|stripe)\b/i;
 
 const CLIENT_PRICE_REGEX =
-  /(?:req\.body|body|payload|data)\.(?:price|amount|total|unitPrice|totalPrice)\b|\{\s*[^}]*\b(?:price|amount|total)\b[^}]*\}\s*=\s*(?:req\.body|await\s+req(?:uest)?\.json\(\))/;
+  /(?:req\.body|request\.body)\.(?:price|amount|total|unitPrice|totalPrice)\b|\{\s*[^}]*\b(?:price|amount|total)\b[^}]*\}\s*=\s*(?:req\.body|request\.body|await\s+req(?:uest)?\.json\(\))/;
 
 const DB_PRICE_LOOKUP_REGEX =
   /\b(?:findUnique|findFirst|findById|findOne|SELECT\s+.*price|products?\[|catalog\[|getProduct|getPrice|PRICES\[|ITEM_PRICES)\b/i;
@@ -22,6 +28,8 @@ export async function runPaymentScan(ctx: StaticScanContext): Promise<ModuleResu
 
     for (const file of ctx.files) {
       if (!isCodeFile(file.relPath)) continue;
+      if (!ctx.includeTests && isTestOrMockFile(file.relPath)) continue;
+      if (isFrontendUiFile(file.relPath)) continue;
 
       // 1. Check webhook handlers for missing cryptographic signature verification
       for (let i = 0; i < file.lines.length; i++) {
@@ -50,9 +58,11 @@ export async function runPaymentScan(ctx: StaticScanContext): Promise<ModuleResu
         }
       }
 
-      // 2. Check for client-trusted price / amount in checkout or order handlers
+      // 2. Check for client-trusted price / amount in checkout or order handlers (deduped per handler window)
       if (CHECKOUT_CONTEXT_REGEX.test(file.content)) {
+        let lastFlaggedLine = -30;
         for (let i = 0; i < file.lines.length; i++) {
+          if (i - lastFlaggedLine < 20) continue;
           const line = file.lines[i];
           if (!CLIENT_PRICE_REGEX.test(line)) continue;
 
@@ -60,6 +70,7 @@ export async function runPaymentScan(ctx: StaticScanContext): Promise<ModuleResu
           const handlerWindow = file.lines.slice(Math.max(0, i - 5), i + 25).join('\n');
 
           if (!DB_PRICE_LOOKUP_REGEX.test(handlerWindow)) {
+            lastFlaggedLine = i;
             findings.push({
               id: 'STAT-004',
               title: 'Client-trusted price or amount read directly from request body',

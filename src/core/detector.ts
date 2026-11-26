@@ -167,9 +167,17 @@ export async function detectStack(
   if (files.includes('uv.lock')) packageManagers.add('uv');
   if (files.includes('requirements.txt')) packageManagers.add('pip');
 
-  // Inspect package.json dependencies
-  const pkgRaw = await readTextSafe(path.join(resolvedTarget, 'package.json'));
-  if (pkgRaw) {
+  // Inspect root and workspace package.json manifests (monorepo support)
+  const packageJsonFiles = files.filter(
+    (f) => f === 'package.json' || /^(?:apps|packages|services|libs|modules)\/[^/]+\/package\.json$/.test(f),
+  );
+  if (packageJsonFiles.length === 0 && (await pathExists(path.join(resolvedTarget, 'package.json')))) {
+    packageJsonFiles.push('package.json');
+  }
+
+  for (const pkgRelPath of packageJsonFiles) {
+    const pkgRaw = await readTextSafe(path.join(resolvedTarget, pkgRelPath));
+    if (!pkgRaw) continue;
     try {
       const pkg = JSON.parse(pkgRaw) as PackageJsonShape;
       const deps = new Set<string>([

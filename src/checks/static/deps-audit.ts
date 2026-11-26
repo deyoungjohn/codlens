@@ -19,7 +19,20 @@ interface NpmAuditJson {
   >;
 }
 
-function mapNpmSeverity(sev?: string): Severity {
+interface PnpmAuditJson {
+  advisories?: Record<
+    string,
+    {
+      module_name?: string;
+      severity?: string;
+      title?: string;
+      vulnerable_versions?: string;
+      patched_versions?: string;
+    }
+  >;
+}
+
+function mapSeverity(sev?: string): Severity {
   switch (sev?.toLowerCase()) {
     case 'critical':
       return 'CRITICAL';
@@ -43,16 +56,38 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+async function execAuditStdout(
+  cmd: string,
+  args: string[],
+  cwd: string,
+): Promise<string> {
+  try {
+    const res = await execFileAsync(cmd, args, {
+      cwd,
+      timeout: 15000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return res.stdout;
+  } catch (err: unknown) {
+    // npm/pnpm audit exits with code 1 when vulnerabilities are found while still writing JSON to stdout
+    if (err && typeof err === 'object' && 'stdout' in err && typeof err.stdout === 'string') {
+      return err.stdout;
+    }
+    return '';
+  }
+}
+
 /**
- * Gracefully wraps `npm audit --json` (and `pip-audit` if present) when lockfiles exist.
+ * Gracefully wraps `npm audit --json` and `pnpm audit --json --prod` when lockfiles exist.
  * Never errors out the audit if offline or if the CLI binary is unavailable.
  */
 export async function runDepsAudit(ctx: StaticScanContext): Promise<ModuleResult> {
   const start = Date.now();
   const hasNpmLock = await exists(path.join(ctx.targetDir, 'package-lock.json'));
+  const hasPnpmLock = await exists(path.join(ctx.targetDir, 'pnpm-lock.yaml'));
   const hasRequirements = await exists(path.join(ctx.targetDir, 'requirements.txt'));
 
-  if (!hasNpmLock && !hasRequirements) {
+  if (!hasNpmLock && !hasPnpmLock && !hasRequirements) {
     return {
       moduleId: 'STAT-DEPS',
       moduleName: 'Dependency Vulnerability Audit',
@@ -60,7 +95,7 @@ export async function runDepsAudit(ctx: StaticScanContext): Promise<ModuleResult
       status: 'skipped',
       durationMs: Date.now() - start,
       findings: [],
-      skippedReason: 'No package-lock.json or requirements.txt found in target directory.',
+      skippedReason: 'No package-lock.json, pnpm-lock.yaml, or requirements.txt found in target directory.',
     };
   }
 
@@ -68,26 +103,12 @@ export async function runDepsAudit(ctx: StaticScanContext): Promise<ModuleResult
 
   if (hasNpmLock) {
     try {
-      let stdout = '';
-      try {
-        const res = await execFileAsync('npm', ['audit', '--json', '--omit=dev'], {
-          cwd: ctx.targetDir,
-          timeout: 15000,
-          maxBuffer: 4 * 1024 * 1024,
-        });
-        stdout = res.stdout;
-      } catch (err: unknown) {
-        // npm audit exits with code 1 when vulnerabilities are found and still writes JSON to stdout
-        if (err && typeof err === 'object' && 'stdout' in err && typeof err.stdout === 'string') {
-          stdout = err.stdout;
-        }
-      }
-
+      const stdout = await execAuditStdout('npm', ['audit', '--json', '--omit=dev'], ctx.targetDir);
       if (stdout.trim().startsWith('{')) {
         const parsed = JSON.parse(stdout) as NpmAuditJson;
         const vulns = parsed.vulnerabilities ?? {};
         for (const [pkgName, info] of Object.entries(vulns)) {
-          const severity = mapNpmSeverity(info.severity);
+          const severity = mapSeverity(info.severity);
           if (severity === 'INFO' || severity === 'LOW') continue;
 
           findings.push({
@@ -108,6 +129,40 @@ export async function runDepsAudit(ctx: StaticScanContext): Promise<ModuleResult
       }
     } catch {
       // Gracefully ignore offline/network errors
+    }
+  } else if (hasPnpmLock) {
+    try {
+      const stdout = await execAuditStdout('pnpm', ['audit', '--json', '--prod'], ctx.targetDir);
+      if (stdout.trim().startsWith('{')) {
+        const parsed = JSON.parse(stdout) as PnpmAuditJson;
+        const advisories = parsed.advisories ?? {};
+        const seen = new Set<string>();
+        for (const adv of Object.values(advisories)) {
+          const pkgName = adv.module_name ?? 'unknown';
+          const severity = mapSeverity(adv.severity);
+          if (severity === 'INFO' || severity === 'LOW') continue;
+          const dedupeKey = `${pkgName}:${adv.title ?? ''}`;
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+
+          findings.push({
+            id: 'STAT-DEPS',
+            title: `Vulnerable pnpm dependency: ${pkgName} (${severity})`,
+            severity,
+            category: 'Production Safety',
+            location: 'pnpm-lock.yaml:1',
+            evidence: `Package "${pkgName}" (${adv.vulnerable_versions ?? 'affected'}) — ${adv.title ?? 'security advisory'} (patched: ${adv.patched_versions ?? 'see advisory'}).`,
+            reproduction: `cd "${ctx.targetDir}" && pnpm audit --prod`,
+            whyItMatters:
+              'Known vulnerabilities in third-party production dependencies can be exploited with public proof-of-concept tools even when your own application code is clean.',
+            howToFix:
+              `Upgrade \`${pkgName}\` to ${adv.patched_versions ?? 'a patched version'} (or add a \`pnpm.overrides\` entry) and re-run \`pnpm audit --prod\`.\n\n` +
+              `AI Fix Prompt: "Upgrade or override the vulnerable pnpm dependency '${pkgName}' to a patched version (${adv.patched_versions ?? 'latest safe'}) and verify tests pass."`,
+          });
+        }
+      }
+    } catch {
+      // Gracefully ignore offline/network errors or missing pnpm binary
     }
   }
 

@@ -125,6 +125,7 @@ export interface DynamicAuthConfig {
 export interface StaticConfig {
   ignorePaths: string[];
   publicEndpointsAllowlist: string[];
+  customAuthHelpers?: string[];
 }
 
 export interface DynamicConfig {

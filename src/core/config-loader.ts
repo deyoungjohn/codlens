@@ -73,6 +73,7 @@ const StaticConfigSchema = z
     publicEndpointsAllowlist: z
       .array(z.string())
       .default(['/api/health', '/api/auth/login', '/api/auth/register']),
+    customAuthHelpers: z.array(z.string()).optional(),
   })
   .default({});
 

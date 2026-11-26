@@ -1,8 +1,8 @@
 import type { Finding, ModuleResult } from '../../types.js';
-import { isCodeFile, runStaticModule, type StaticScanContext } from './utils.js';
+import { isCodeFile, isTestOrMockFile, runStaticModule, type StaticScanContext } from './utils.js';
 
 const AUTH_SIGNAL_REGEX =
-  /\b(?:requireAuth|authenticate|authMiddleware|isAuthenticated|verifyToken|verifyJwt|jwt\.verify|getServerSession|getSession|auth\(\)|currentUser|req\.user|request\.user|getAuth|supabase\.auth\.getUser|Depends\s*\(\s*get_current_user|login_required|permission_classes)\b/i;
+  /\b(?:requireAuth|authenticate|authMiddleware|isAuthenticated|verifyToken|verifyJwt|jwt\.verify|getServerSession|getSession|auth\(\)|currentUser|req\.user|request\.user|getAuth|supabase\.auth\.getUser|Depends\s*\(\s*get_current_user|login_required|permission_classes|preHandler\s*:|(?:verify|require|check|assert|ensure|validate)[A-Za-z0-9_]*(?:Auth|Session|Token|Operator|Admin|User|Signature|ApiKey))\b/i;
 
 const FILE_LEVEL_AUTH_USE_REGEX =
   /\b(?:app|router)\.use\s*\([^)]*(?:auth|authenticate|verifyToken|requireAuth|session)/i;
@@ -28,13 +28,20 @@ function deriveNextRoutePath(relPath: string): string | null {
   return null;
 }
 
+function hasAuthSignal(text: string, customHelpers: string[]): boolean {
+  if (AUTH_SIGNAL_REGEX.test(text)) return true;
+  return customHelpers.some((helper) => helper.length > 0 && text.includes(helper));
+}
+
 export async function runAuthRoutesScan(ctx: StaticScanContext): Promise<ModuleResult> {
   return runStaticModule('STAT-003', 'Missing Route Auth Heuristics', () => {
     const findings: Finding[] = [];
     const allowlist = ctx.config.static.publicEndpointsAllowlist;
+    const customHelpers = ctx.config.static.customAuthHelpers ?? [];
 
     for (const file of ctx.files) {
       if (!isCodeFile(file.relPath)) continue;
+      if (!ctx.includeTests && isTestOrMockFile(file.relPath)) continue;
 
       const hasFileLevelAuthMiddleware = FILE_LEVEL_AUTH_USE_REGEX.test(file.content);
 
@@ -51,7 +58,7 @@ export async function runAuthRoutesScan(ctx: StaticScanContext): Promise<ModuleR
           const lineNum = file.content.slice(0, match.index).split(/\r?\n/).length;
           const windowText = file.lines.slice(lineNum - 1, lineNum + 35).join('\n');
 
-          if (!AUTH_SIGNAL_REGEX.test(windowText)) {
+          if (!hasAuthSignal(windowText, customHelpers)) {
             findings.push({
               id: 'STAT-003',
               title: `Potentially unprotected Next.js route: ${method} ${nextRoutePath}`,
@@ -102,7 +109,7 @@ export async function runAuthRoutesScan(ctx: StaticScanContext): Promise<ModuleR
         const hasPriorAuthUse =
           hasFileLevelAuthMiddleware && FILE_LEVEL_AUTH_USE_REGEX.test(precedingContent);
 
-        if (!hasPriorAuthUse && !AUTH_SIGNAL_REGEX.test(snippetWindow)) {
+        if (!hasPriorAuthUse && !hasAuthSignal(snippetWindow, customHelpers)) {
           findings.push({
             id: 'STAT-003',
             title: `Potentially unprotected route: ${method} ${routePath}`,
@@ -146,7 +153,7 @@ export async function runAuthRoutesScan(ctx: StaticScanContext): Promise<ModuleR
           const endIdx = Math.min(lineNum + 20, nextLineNum - 1);
           const snippetWindow = file.lines.slice(lineNum - 1, Math.max(lineNum, endIdx)).join('\n');
 
-          if (!AUTH_SIGNAL_REGEX.test(snippetWindow)) {
+          if (!hasAuthSignal(snippetWindow, customHelpers)) {
             findings.push({
               id: 'STAT-003',
               title: `Potentially unprotected Python route: ${method} ${routePath}`,
